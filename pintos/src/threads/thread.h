@@ -92,9 +92,13 @@ struct thread
 
    /* Shared between thread.c and synch.c. */
    struct list_elem elem;       /**< List element. */
-   struct list donate_priority; /**< List element for donation list. */\
-   int priority;              /**< Priority. */
-   
+   struct list donate_priority; /**< List element for donation list. */
+   int priority;                /**< Priority. */
+   struct lock *waiting_lock;   /**< The lock that the thread is waiting on, if any. */
+
+   /* Shared between thread.c and timer.c. */
+   int nice;
+   int recent_cpu;
 #ifdef USERPROG
    /* Owned by userprog/process.c. */
    uint32_t *pagedir; /**< Page directory. */
@@ -139,5 +143,10 @@ int thread_get_nice(void);
 void thread_set_nice(int);
 int thread_get_recent_cpu(void);
 int thread_get_load_avg(void);
+
+void thread_recent_cpu_incre(struct thread *t);
+void load_avg_calc_mlfqs(void);
+void thread_priority_calc_mlfqs(struct thread *t, void *aux);
+void thread_recent_cpu_calc_mlfqs(struct thread *t, void *aux);
 
 #endif /**< threads/thread.h */
