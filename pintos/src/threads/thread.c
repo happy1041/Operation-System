@@ -383,6 +383,7 @@ void thread_set_priority(int new_priority)
 {
   if (thread_mlfqs)
     return;
+  enum intr_level old_level = intr_disable();
   struct thread *cur = thread_current();
   cur->base_priority = new_priority;
   donate_priority_update(cur);
@@ -392,17 +393,22 @@ void thread_set_priority(int new_priority)
     if (nextt->priority > cur->priority)
       thread_yield();
   }
+  intr_set_level(old_level);
 }
 
 /** Returns the current thread's priority. */
 int thread_get_priority(void)
 {
-  return thread_current()->priority;
+  enum intr_level old_level = intr_disable();
+  int priority = thread_current()->priority;
+  intr_set_level(old_level);
+  return priority;
 }
 
 /** Sets the current thread's nice value to NICE. */
-void thread_set_nice(int nice UNUSED)
+void thread_set_nice(int nice)
 {
+  enum intr_level old_level = intr_disable();
   struct thread *cur = thread_current();
   cur->nice = nice;
   thread_priority_calc_mlfqs(cur, NULL);
@@ -412,24 +418,34 @@ void thread_set_nice(int nice UNUSED)
     if (nextt->priority > cur->priority)
       thread_yield();
   }
+  intr_set_level(old_level);
 }
 
 /** Returns the current thread's nice value. */
 int thread_get_nice(void)
 {
-  return thread_current()->nice;
+  enum intr_level old_level = intr_disable();
+  int nice = thread_current()->nice;
+  intr_set_level(old_level);
+  return nice;
 }
 
 /** Returns 100 times the system load average. */
 int thread_get_load_avg(void)
 {
-  return FP_TO_INT_ROUND(FP_MUL_INT(load_avg, 100));
+  enum intr_level old_level = intr_disable();
+  int result = FP_TO_INT_ROUND(FP_MUL_INT(load_avg, 100));
+  intr_set_level(old_level);
+  return result;
 }
 
 /** Returns 100 times the current thread's recent_cpu value. */
 int thread_get_recent_cpu(void)
 {
-  return FP_TO_INT_ROUND(FP_MUL_INT(thread_current()->recent_cpu, 100));
+  enum intr_level old_level = intr_disable();
+  int result = FP_TO_INT_ROUND(FP_MUL_INT(thread_current()->recent_cpu, 100));
+  intr_set_level(old_level);
+  return result;
 }
 
 /** Idle thread.  Executes when no other thread is ready to run.

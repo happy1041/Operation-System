@@ -252,6 +252,7 @@ void lock_acquire(struct lock *lock)
   }
   intr_set_level(old_level);
   sema_down(&lock->semaphore);
+  ASSERT(lock->holder == NULL);
   lock->holder = thread_current();
   return;
 }
@@ -301,6 +302,7 @@ void lock_release(struct lock *lock)
     }
     donate_priority_update(thread_current());
   }
+  ASSERT(lock->holder == thread_current());
   lock->holder = NULL;
   intr_set_level(old_level);
   sema_up(&lock->semaphore);

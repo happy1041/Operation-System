@@ -5,7 +5,7 @@
 
 /* 17.14 fixed-point number representation.
    p = 17 integer bits, q = 14 fractional bits, 1 sign bit.
-   f = 2^q = 1 << 14 = 16384。 */
+   f = 2^q = 1 << 14 = 16384. */
 
 #define FP_Q 14
 #define FP_F (1 << FP_Q)
