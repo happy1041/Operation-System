@@ -539,6 +539,15 @@ init_thread(struct thread *t, const char *name, int priority)
   list_init(&t->donate_priority);
   t->waiting_lock = NULL;
 
+#ifdef USERPROG
+  list_init(&t->children);                     /* 初始时子进程列表为空 */
+  t->child_info = NULL;                        /* 尚未加入任何父进程的 children 列表 */
+  t->exit_status = 0;                          /* 默认退出码为 0（正常退出） */
+  t->exec_file = NULL;                         /* 尚未加载可执行文件，load() 成功后才赋值 */
+  memset(t->fd_table, 0, sizeof(t->fd_table)); /* 将所有 fd 槽清为 NULL */
+  t->fd_next = 2;                              /* fd 0=stdin、fd 1=stdout 保留，用户 fd 从 2 开始分配 */
+#endif
+
   if (thread_mlfqs)
   {
     if (t == initial_thread)

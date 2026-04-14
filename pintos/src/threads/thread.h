@@ -5,6 +5,9 @@
 #include <list.h>
 #include <stdint.h>
 
+/* Forward declaration to avoid circular include with process.h. */
+struct child_info;
+
 /** States in a thread's life cycle. */
 enum thread_status
 {
@@ -101,7 +104,13 @@ struct thread
    int recent_cpu;
 #ifdef USERPROG
    /* Owned by userprog/process.c. */
-   uint32_t *pagedir; /**< Page directory. */
+   uint32_t *pagedir;             /**< Page directory. */
+   int exit_status;               /**< Exit status code (default 0). */
+   struct list children;          /**< List of child_info for this thread's children. */
+   struct child_info *child_info; /**< Pointer to this thread's child_info in parent's children list. */
+   struct file *exec_file;        /**< Executable file (deny-write held). */
+   struct file *fd_table[128];    /**< File descriptor table; fd 0/1 reserved for stdin/stdout. */
+   int fd_next;                   /**< Next allocatable fd, starts at 2. */
 #endif
 
    /* Owned by thread.c. */
