@@ -41,4 +41,15 @@ sema up：/* 只有当唤醒的线程优先级高于当前线程时才 yield */
 完成了参数传递+系统调用 halt, exit, exec, wait 的实现。
 process.c 负责实现新进程（也包括 load，压栈），syscall.c 负责实现系统调用接口。
 
-process.h 里写一下 exit_status, 以及父子进程关系的 struct child_process。
+process.h 里写一下 exit_status, 以及父子进程关系的 struct child_process——process_wait,process_exit 需要用到。
+
+### Part 2
+fd_table
+syscall.c 里首先添加一个全局文件锁
+感觉要查一下文件系统里各种函数的实现。
+
+PS：对于字符串指针的合法 check 需要逐字节验证
+PS：kill，load 失败时对 exit_status 的设置
+
+### Part 3
+禁止写可执行文件：load 和 process_exit
