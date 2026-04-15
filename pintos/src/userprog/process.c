@@ -592,6 +592,9 @@ setup_stack(void **esp, const char *cmd_line)
     }
   }
 
+  /* 栈底地址：esp 不可低于此值，否则越过栈页边界。 */
+  void *stack_bottom = (void *)((uint8_t *)PHYS_BASE - PGSIZE);
+
   char *copy = palloc_get_page(0);
   if (copy == NULL)
     return false;
@@ -601,14 +604,24 @@ setup_stack(void **esp, const char *cmd_line)
   int argc = 0;
   char *token, *save_ptr;
   for (token = strtok_r(copy, " ", &save_ptr); token != NULL; token = strtok_r(NULL, " ", &save_ptr))
+  {
+    if (argc >= 64)
+      break;
     argv[argc++] = token;
+  }
 
   /* Push arguments onto the stack in reverse order. */
   char *arg_addr[64];
   for (int i = argc - 1; i >= 0; i--)
   {
-    *esp -= strlen(argv[i]) + 1;
-    memcpy(*esp, argv[i], strlen(argv[i]) + 1);
+    size_t len = strlen(argv[i]) + 1;
+    *esp -= len;
+    if (*esp < stack_bottom)
+    {
+      palloc_free_page(copy);
+      return false;
+    }
+    memcpy(*esp, argv[i], len);
     arg_addr[i] = *esp;
   }
 
@@ -617,19 +630,28 @@ setup_stack(void **esp, const char *cmd_line)
   esp_uint &= 0xfffffffc;
   *esp = (void *)esp_uint;
 
-  /* Push a null sentinel. */
+  /* 计算剩余需要压栈的空间：
+     (argc+1) 个指针 + argv + argc + 返回地址 */
+  size_t remaining = (argc + 1) * sizeof(char *) + sizeof(char **) + sizeof(int) + sizeof(void *);
+  if ((uintptr_t)*esp - remaining < (uintptr_t)stack_bottom)
+  {
+    palloc_free_page(copy);
+    return false;
+  }
+
+  /* Push null sentinel. */
   *esp -= sizeof(char *);
   *(char **)*esp = NULL;
 
-  /* Push addresses of the arguments. */
+  /* Push argv pointers in reverse order. */
   for (int i = argc - 1; i >= 0; i--)
   {
     *esp -= sizeof(char *);
     *(char **)*esp = arg_addr[i];
   }
 
-  /* Push argv (pointer to the first argument). */
-  char **argv_ptr = *esp;
+  /* Push argv (pointer to argv[0]). */
+  char **argv_ptr = (char **)*esp;
   *esp -= sizeof(char **);
   *(char ***)*esp = argv_ptr;
 

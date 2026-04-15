@@ -16,9 +16,10 @@
 #define STDOUT_FILENO 1 /* 标准输出的文件描述符编号，保留，不可关闭/重分配 */
 
 static void syscall_handler(struct intr_frame *);
-static void check_ptr(const void *ptr);          /* 验证单个用户空间指针的合法性 */
-static void check_str(const char *s);            /* 逐字节验证字符串直到 '\0'，防止跨页问题 */
-static int get_arg(struct intr_frame *f, int n); /* 从用户栈取第 n 个 syscall 参数 */
+static void check_ptr(const void *ptr);                /* 验证单个用户空间指针的合法性 */
+static void check_buf(const void *buf, unsigned size); /* 逐页验证缓冲区每一页均已映射 */
+static void check_str(const char *s);                  /* 逐页验证字符串，每页只调用一次 pagedir_get_page */
+static int get_arg(struct intr_frame *f, int n);       /* 从用户栈取第 n 个 syscall 参数 */
 static void syscall_exit(int status);
 
 /* 全局文件系统锁：Pintos 文件系统不是线程安全的，
@@ -172,9 +173,7 @@ syscall_handler(struct intr_frame *f)
     int fd = get_arg(f, 0);
     void *buf = (void *)get_arg(f, 1);
     unsigned sz = (unsigned)get_arg(f, 2);
-    check_ptr(buf); /* 验证缓冲区起始地址 */
-    if (sz > 0)
-      check_ptr((char *)buf + sz - 1); /* 验证缓冲区末尾地址 */
+    check_buf(buf, sz); /* 逐页验证缓冲区每一页均已映射 */
     if (fd == STDIN_FILENO)
     {
       uint8_t *b = buf;
@@ -206,9 +205,7 @@ syscall_handler(struct intr_frame *f)
     int fd = get_arg(f, 0);
     void *buf = (void *)get_arg(f, 1);
     unsigned sz = (unsigned)get_arg(f, 2);
-    check_ptr(buf);
-    if (sz > 0)
-      check_ptr((char *)buf + sz - 1);
+    check_buf(buf, sz); /* 逐页验证缓冲区每一页均已映射 */
     if (fd == STDOUT_FILENO)
     {
       putbuf(buf, sz); /* 内核输出函数，直接写控制台，无需加锁 */
@@ -282,18 +279,39 @@ check_ptr(const void *ptr)
     syscall_exit(-1);
 }
 
-/* check_str - 逐字节验证以 NUL 结尾的字符串。
-   对字符串中的每一个字节（包括终止符 '\0'）调用 check_ptr，
-   确保整个字符串都在用户合法内存中，防止字符串越过映射边界。 */
+/* check_buf - 验证用户空间缓冲区 [buf, buf+size) 所覆盖的每一页均已映射。
+   先验证起始地址，再逐一检查页边界，最后验证末字节，确保跨越多页
+   的缓冲区中间页不被漏检。size==0 时仅验证起始指针本身。 */
+static void
+check_buf(const void *buf, unsigned size)
+{
+  const uint8_t *p = (const uint8_t *)buf;
+  check_ptr(p); /* 验证第一页 */
+  /* 从第一个页边界起逐页检查：条件 next < p+size 保证凡缓冲区涉及的页都被命中，
+     无需单独检查末字节（末页的页边界已被循环覆盖，或与第一页相同） */
+  uintptr_t next = (((uintptr_t)p) & ~(uintptr_t)(PGSIZE - 1)) + PGSIZE;
+  for (; next < (uintptr_t)p + size; next += PGSIZE)
+    check_ptr((const void *)next);
+}
+
+/* check_str - 逐页验证以 NUL 结尾的字符串。
+   每到达一个新页时调用一次 check_ptr，然后在页内线性扫描 '\0'，
+   从而将 pagedir_get_page 调用次数从 O(字节数) 降低到 O(页数)。 */
 static void
 check_str(const char *s)
 {
   while (true)
   {
-    check_ptr(s);
-    if (*s == '\0')
-      break;
-    s++;
+    check_ptr(s); /* 验证当前页是否已映射 */
+    /* 在本页内扫描 '\0'，不再逐字节调用 check_ptr */
+    const char *page_end = (const char *)((((uintptr_t)s) & ~(uintptr_t)(PGSIZE - 1)) + PGSIZE);
+    while (s < page_end)
+    {
+      if (*s == '\0')
+        return;
+      s++;
+    }
+    /* s 现已指向下一页开头，外层循环继续验证 */
   }
 }
 
