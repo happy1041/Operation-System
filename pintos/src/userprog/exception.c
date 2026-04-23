@@ -87,9 +87,7 @@ kill(struct intr_frame *f)
       printf("%s: dying due to interrupt %#04x (%s).\n",
              thread_name(), f->vec_no, intr_name(f->vec_no));
       intr_dump_frame(f);
-      /* 被内核异常杀死的进程必须向父进程报告退出码 -1。
-         Pintos 规范要求：凡是被内核终止（而非主动调用 exit）的进程，
-         其退出状态均视为 -1，以便 wait() 能区分"正常退出"与"异常终止"。 */
+      /* exit_status 因异常退出设置为 -1*/
       thread_current()->exit_status = -1;
       thread_exit();
 

@@ -1,4 +1,5 @@
 #include "userprog/process.h"
+#include "userprog/syscall.h"
 #include <debug.h>
 #include <inttypes.h>
 #include <round.h>
@@ -17,6 +18,7 @@
 #include "threads/palloc.h"
 #include "threads/thread.h"
 #include "threads/vaddr.h"
+
 #include "threads/synch.h"
 #include "threads/malloc.h"
 
@@ -39,6 +41,7 @@ tid_t process_execute(const char *file_name)
     return TID_ERROR;
   strlcpy(fn_copy, file_name, PGSIZE);
 
+  /*Get exename*/
   char *save_ptr;
   char name_copy[16];
   strlcpy(name_copy, file_name, sizeof name_copy);
@@ -59,10 +62,7 @@ tid_t process_execute(const char *file_name)
   ci->load_success = false;
   ci->ref_count = 2;
 
-  /* 将 ci 指针藏在 fn_copy 页面的最后几个字节里，作为向子线程传递参数的"隐藏通道"。
-     fn_copy 本身只用于存放命令行字符串（最长 PGSIZE），真正的命令不会占满一整页，
-     因此可以安全地借用页面尾部的 sizeof(void*) 字节来传递 ci 指针，
-     避免额外分配第二块内存或使用全局变量。 */
+  /* 将 ci 指针藏在 fn_copy 页面的最后几个字节里，传递给子线程 */
   *(struct child_info **)(fn_copy + PGSIZE - sizeof(struct child_info *)) = ci;
 
   /* Create a new thread to execute EXE_NAME. */
@@ -84,7 +84,7 @@ tid_t process_execute(const char *file_name)
   if (!ci->load_success)
   {
     list_remove(&ci->elem);
-    ci->ref_count--; /* 父进程放弃引用 */
+    ci->ref_count--;
     if (ci->ref_count == 0)
       free(ci);
     return TID_ERROR;
@@ -117,7 +117,6 @@ start_process(void *file_name_)
   ci->load_success = success;
   sema_up(&ci->load_sema);
 
-  /* If load failed, quit. */
   palloc_free_page(file_name);
   if (!success)
     thread_exit();
@@ -140,7 +139,9 @@ start_process(void *file_name_)
    immediately, without waiting.
 
    This function will be implemented in problem 2-2.  For now, it
-   does nothing. */
+   does nothing.
+
+   Finished now.*/
 int process_wait(tid_t child_tid)
 {
   struct thread *cur = thread_current();
@@ -167,8 +168,7 @@ int process_wait(tid_t child_tid)
   sema_down(&ci->sema); /* 阻塞，直到子进程在 process_exit() 中 sema_up 唤醒 */
   int status = ci->exit_status;
 
-  /* 父进程完成 wait 后放弃对 ci 的引用。
-     此时子进程已退出（ref_count 已被子进程减过），若父进程是最后一个则 free。 */
+  /* 父进程完成 wait 后放弃对 ci 的引用。若父进程是最后一个则 free。 */
   list_remove(&ci->elem);
   ci->ref_count--;
   if (ci->ref_count == 0)
@@ -184,8 +184,7 @@ void process_exit(void)
   uint32_t *pd;
 
   /* 通过 child_info 向父进程报告退出状态。
-     将 exit_status 写入共享结构后 sema_up，唤醒可能正在 process_wait() 阻塞的父进程。
-     随后子进程放弃对 ci 的引用；若父进程早已退出（ref_count 已为 1），则由子进程 free。 */
+    若父进程早已退出（ref_count 已为 1），则由子进程 free。 */
   struct child_info *ci = cur->child_info;
   if (ci != NULL)
   {
@@ -201,7 +200,7 @@ void process_exit(void)
      若子进程已经退出（ref_count 已被子进程减为 1），则由父进程负责 free；
      若子进程还未退出（ref_count 仍为 2），则将其减为 1，
      子进程退出时会发现自己是最后一个引用者并自行 free。
-     以此确保无论父子谁先退出，child_info 都能被正确释放，无内存泄漏。 */
+     */
   struct list_elem *e = list_begin(&cur->children);
   while (e != list_end(&cur->children))
   {
@@ -218,7 +217,9 @@ void process_exit(void)
   pd = cur->pagedir;
   if (pd != NULL)
   {
-    /* Close all open file descriptors. */
+    /* 关闭所有打开的文件描述符。
+       必须持 filesys_lock：file_close 修改文件系统内部引用计数，非线程安全。 */
+    filesys_acquire();
     for (int i = 2; i < 128; i++)
     {
       if (cur->fd_table[i] != NULL)
@@ -228,19 +229,17 @@ void process_exit(void)
       }
     }
 
-    /* Task 5：进程退出时恢复对自身可执行文件的写权限并关闭文件句柄。
-       exec_file 仅在 load() 成功后被设置；内核线程或加载失败的进程其值为 NULL。
-       was_user_process 作为"是否需要打印退出信息"的标志：
-       只有真正运行过用户代码的进程才需要输出 "process_name: exit(N)"。 */
+    /* Task 5：释放可执行文件句柄 + 解除写保护。*/
     bool was_user_process = (cur->exec_file != NULL);
     if (cur->exec_file != NULL)
     {
-      file_allow_write(cur->exec_file); /* 解除写保护，允许其他人重新写该 ELF 文件 */
+      file_allow_write(cur->exec_file);
       file_close(cur->exec_file);
       cur->exec_file = NULL;
     }
+    filesys_release();
 
-    /* 只有真正运行过用户代码的进程才打印退出信息（内核辅助线程不打印）。 */
+    /*打印退出信息*/
     if (was_user_process)
       printf("%s: exit(%d)\n", cur->name, cur->exit_status);
 
@@ -357,6 +356,7 @@ bool load(const char *file_name, void (**eip)(void), void **esp)
   struct file *file = NULL;
   off_t file_ofs;
   bool success = false;
+  bool fs_locked = false; /* 跟踪 filesys_lock 是否被本函数持有 */
   int i;
 
   /* Allocate and activate page directory. */
@@ -366,6 +366,8 @@ bool load(const char *file_name, void (**eip)(void), void **esp)
   process_activate();
 
   /* Open executable file. */
+  filesys_acquire();
+  fs_locked = true;
   file = filesys_open(exe_name);
   if (file == NULL)
   {
@@ -438,6 +440,10 @@ bool load(const char *file_name, void (**eip)(void), void **esp)
     }
   }
 
+  /* setup_stack 不涉及文件系统，在此之前释放锁以减少持锁时间 */
+  filesys_release();
+  fs_locked = false;
+
   /* Set up stack. */
   if (!setup_stack(esp, file_name))
     goto done;
@@ -448,21 +454,22 @@ bool load(const char *file_name, void (**eip)(void), void **esp)
   success = true;
 
 done:
-  /* We arrive here whether the load is successful or not. */
+  /* 若在 ELF 读取中途 goto done，锁仍被持有，先释放 */
+  if (fs_locked)
+    filesys_release();
+
+  /* Task 5：成功则保留句柄并禁写；失败则关闭文件（NULL-safe）*/
+  filesys_acquire();
   if (success)
   {
-    /* Task 5：将可执行文件句柄保留在 exec_file 中，并调用 file_deny_write 禁止写入。
-       这防止了进程在运行期间有人覆盖其正在执行的代码（类似 Linux 的 ETXTBSY）。
-       file_deny_write / file_allow_write 是 Pintos 文件系统层的引用计数机制：
-       每次 deny 使计数 +1，allow 使计数 -1，计数为 0 时才真正允许写入。
-       文件句柄会在 process_exit() 中通过 file_allow_write + file_close 归还。 */
     file_deny_write(file);
     thread_current()->exec_file = file;
   }
   else
   {
-    file_close(file); /* file 可能为 NULL（filesys_open 失败），file_close 对 NULL 安全 */
+    file_close(file);
   }
+  filesys_release();
   return success;
 }
 
@@ -592,7 +599,6 @@ setup_stack(void **esp, const char *cmd_line)
     }
   }
 
-  /* 栈底地址：esp 不可低于此值，否则越过栈页边界。 */
   void *stack_bottom = (void *)((uint8_t *)PHYS_BASE - PGSIZE);
 
   char *copy = palloc_get_page(0);

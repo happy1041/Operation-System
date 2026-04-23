@@ -32,13 +32,14 @@ void syscall_init(void)
   intr_register_int(0x30, 3, INTR_ON, syscall_handler, "syscall");
 }
 
-/* 系统调用总入口：从用户栈读取 syscall 编号，分发到各 case。
-   用户程序触发 int 0x30 中断后进入此函数，f->esp 指向用户栈顶。
-   栈布局：[esp+0]=syscall_num, [esp+4]=arg0, [esp+8]=arg1, ... */
+void filesys_acquire(void) { lock_acquire(&filesys_lock); }
+void filesys_release(void) { lock_release(&filesys_lock); }
+
+/* 系统调用总入口：从用户栈读取 syscall 编号，分发到各 case。*/
 static void
 syscall_handler(struct intr_frame *f)
 {
-  /* 验证 esp 本身及其后 3 字节（syscall_num 占 4 字节）均可访问 */
+  /* 验证 syscall_num 可访问 */
   check_ptr(f->esp);
   check_ptr((char *)f->esp + 3);
   int syscall_num = *(int *)f->esp;
@@ -62,7 +63,7 @@ syscall_handler(struct intr_frame *f)
     /* exec(cmd)：创建子进程执行 cmd 指代的程序。
        父进程会阻塞直到子进程完成 ELF 加载（成功或失败），
        加载失败时返回 -1（TID_ERROR），加载成功返回子进程 tid。
-       注意：不等子进程退出，只等加载结束。 */
+        */
     const char *cmd = (const char *)get_arg(f, 0);
     check_str(cmd); /* 字符串可能跨页，需逐字节验证 */
     tid_t tid = process_execute(cmd);
@@ -75,7 +76,7 @@ syscall_handler(struct intr_frame *f)
     /* wait(tid)：等待指定子进程退出并返回其退出码。
        若 tid 不是直接子进程、已经 wait 过、或子进程被内核杀死，返回 -1。 */
     tid_t tid = (tid_t)get_arg(f, 0);
-    f->eax = process_wait(tid);
+    f->eax = process_wait(tid); /*更多的交给 process_wait 处理 */
     break;
   }
 
@@ -96,7 +97,7 @@ syscall_handler(struct intr_frame *f)
   case SYS_REMOVE:
   {
     /* remove(name)：删除文件。即使文件正在被其他进程打开也可删除，
-       但该文件在所有 fd 关闭前仍可继续读写（类似 Unix unlink）。 */
+       但该文件在所有 fd 关闭前仍可继续读写 */
     const char *name = (const char *)get_arg(f, 0);
     check_str(name);
     lock_acquire(&filesys_lock);
@@ -109,7 +110,7 @@ syscall_handler(struct intr_frame *f)
   {
     /* open(name)：打开文件，返回文件描述符（fd >= 2）。
        fd 0/1 保留给 stdin/stdout，用户程序必须通过 fd_table 管理其他文件。
-       fd_table 最多支持 128 项（fd 2..127），超出返回 -1。 */
+        */
     const char *name = (const char *)get_arg(f, 0);
     check_str(name);
     lock_acquire(&filesys_lock);
@@ -144,7 +145,7 @@ syscall_handler(struct intr_frame *f)
     lock_acquire(&filesys_lock);
     file_close(t->fd_table[fd]);
     lock_release(&filesys_lock);
-    t->fd_table[fd] = NULL; /* 清空槽位，避免悬空指针 */
+    t->fd_table[fd] = NULL;
     break;
   }
 
@@ -167,7 +168,7 @@ syscall_handler(struct intr_frame *f)
   case SYS_READ:
   {
     /* read(fd, buf, size)：从 fd 读取最多 size 字节到 buf。
-       fd == 0（stdin）：从键盘逐字节读取。
+       fd == 0：从键盘逐字节读取。
        其他 fd：从文件的当前位置读，读后文件位置自动前进。
        返回实际读取字节数，失败返回 -1。 */
     int fd = get_arg(f, 0);
@@ -178,7 +179,7 @@ syscall_handler(struct intr_frame *f)
     {
       uint8_t *b = buf;
       for (unsigned i = 0; i < sz; i++)
-        b[i] = input_getc(); /* 从键盘驱动读单个字节（阻塞直到有按键） */
+        b[i] = input_getc(); /* input_getc as pintos manual said */
       f->eax = sz;
     }
     else
@@ -208,7 +209,7 @@ syscall_handler(struct intr_frame *f)
     check_buf(buf, sz); /* 逐页验证缓冲区每一页均已映射 */
     if (fd == STDOUT_FILENO)
     {
-      putbuf(buf, sz); /* 内核输出函数，直接写控制台，无需加锁 */
+      putbuf(buf, sz); /* putbuf as pintos manual said */
       f->eax = sz;
     }
     else
@@ -230,13 +231,12 @@ syscall_handler(struct intr_frame *f)
   {
     /* seek(fd, pos)：将文件 fd 的读写位置（文件位置指针）设置为距文件开头 pos 字节处。
        pos = 0 表示跳到文件开头，pos = filesize 表示跳到文件末尾（之后 read 返回 0）。
-       允许 seek 到超过文件末尾的位置，此后 write 会在中间形成"空洞"（read 返回 0 字节）。
-       不返回值（void），fd 无效时静默忽略。 */
+       不返回值 */
     int fd = get_arg(f, 0);
     unsigned pos = (unsigned)get_arg(f, 1);
     struct thread *t = thread_current();
     if (fd < 2 || fd >= 128 || t->fd_table[fd] == NULL)
-      break; /* 无效 fd，静默忽略 */
+      break; /* 无效 fd*/
     lock_acquire(&filesys_lock);
     file_seek(t->fd_table[fd], pos);
     lock_release(&filesys_lock);
@@ -295,8 +295,7 @@ check_buf(const void *buf, unsigned size)
 }
 
 /* check_str - 逐页验证以 NUL 结尾的字符串。
-   每到达一个新页时调用一次 check_ptr，然后在页内线性扫描 '\0'，
-   从而将 pagedir_get_page 调用次数从 O(字节数) 降低到 O(页数)。 */
+   每到达一个新页时调用一次 check_ptr，然后在页内线性扫描 '\0'，*/
 static void
 check_str(const char *s)
 {
@@ -311,15 +310,11 @@ check_str(const char *s)
         return;
       s++;
     }
-    /* s 现已指向下一页开头，外层循环继续验证 */
   }
 }
 
-/* get_arg - 从中断帧中读取第 n 个（0-based）syscall 参数。
-   x86 syscall 调用约定：用户程序用 pushl 依次压入参数，再 int $0x30。
-   栈布局：[esp+0]=syscall 号, [esp+4]=arg0, [esp+8]=arg1, ...
-   这里将 esp 当作 int* 使用，第 n 个参数在 esp[n+1]。
-   先验证指针的 4 个字节均合法，再解引用返回值。 */
+/* get_arg - 从用户栈 f->esp 中获取第 n 个 4 字节系统调用参数。
+   先验证合法，再解引用返回值。 */
 static int
 get_arg(struct intr_frame *f, int n)
 {

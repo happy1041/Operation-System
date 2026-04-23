@@ -102,6 +102,7 @@ struct thread
    /* Shared between thread.c and timer.c. */
    int nice;
    int recent_cpu;
+
 #ifdef USERPROG
    /* Owned by userprog/process.c. */
    uint32_t *pagedir;             /**< Page directory. */
