@@ -16,12 +16,24 @@ SECTIONS
   .rodata : { *(.rodata) *(.rodata.*) 
 	      . = ALIGN(0x1000); 
 	      _end_kernel_text = .; }
-  .data : { *(.data) 
+  .data : {
+            *(.data)
+            *(.data.*)
+            *(.got)
+            *(.got.plt)
+            *(.data.rel.ro.local*)
+            *(.data.rel.ro*)
+            *(.data.rel.local*)
+            *(.data.rel*)
 	    _signature = .; LONG(0xaa55aa55) }
 
   /* BSS (zero-initialized data) is after everything else. */
-  _start_bss = .;
-  .bss : { *(.bss) }
+  .bss : {
+           _start_bss = .;
+           *(.bss)
+           *(.bss.*)
+           *(COMMON)
+         }
   _end_bss = .;
 
   _end = .;

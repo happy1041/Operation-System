@@ -14,6 +14,9 @@
 #include "threads/fixed-point.h"
 #ifdef USERPROG
 #include "userprog/process.h"
+#ifdef VM
+#include "vm/page.h"
+#endif
 #endif
 
 /** Random value for struct thread's `magic' member.
@@ -34,6 +37,10 @@ static struct thread *idle_thread;
 
 /** Initial thread, the thread running init.c:main(). */
 static struct thread *initial_thread;
+
+#ifdef VM
+static bool vm_ready;
+#endif
 
 /** Lock used by allocate_tid(). */
 static struct lock tid_lock;
@@ -89,6 +96,10 @@ static tid_t allocate_tid(void);
 void thread_init(void)
 {
   ASSERT(intr_get_level() == INTR_OFF);
+
+#ifdef VM
+  vm_ready = false;
+#endif
 
   lock_init(&tid_lock);
   list_init(&ready_list);
@@ -546,6 +557,13 @@ init_thread(struct thread *t, const char *name, int priority)
   t->exec_file = NULL;
   memset(t->fd_table, 0, sizeof(t->fd_table));
   t->fd_next = 2; /*starts from 2*/
+#ifdef VM
+  /* 先把 VM 字段清零；真正 hash_init 需要等 malloc 可用后再做。 */
+  memset(&t->spt, 0, sizeof t->spt);
+  t->saved_esp = NULL;
+  if (vm_ready)
+    thread_vm_init(t);
+#endif
 #endif
 
   if (thread_mlfqs)
@@ -566,6 +584,22 @@ init_thread(struct thread *t, const char *name, int priority)
   list_push_back(&all_list, &t->allelem);
   intr_set_level(old_level);
 }
+
+#ifdef VM
+void thread_vm_init(struct thread *t)
+{
+  /* SPT 依赖 hash 与动态内存，因此单独放到 VM 启用阶段初始化。 */
+  if (!page_table_init(&t->spt))
+    PANIC("failed to initialize supplemental page table");
+}
+
+void thread_vm_enable(void)
+{
+  /* 初始线程在 thread_init 时还不能安全初始化 SPT，这里补做一次。 */
+  vm_ready = true;
+  thread_vm_init(initial_thread);
+}
+#endif
 
 /** Allocates a SIZE-byte frame at the top of thread T's stack and
    returns a pointer to the frame's base. */

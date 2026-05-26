@@ -11,6 +11,9 @@
 #include "devices/input.h"
 #include "filesys/filesys.h"
 #include "filesys/file.h"
+#ifdef VM
+#include "vm/page.h"
+#endif
 
 #define STDIN_FILENO 0  /* 标准输入的文件描述符编号，保留，不可关闭/重分配 */
 #define STDOUT_FILENO 1 /* 标准输出的文件描述符编号，保留，不可关闭/重分配 */
@@ -21,6 +24,10 @@ static void check_buf(const void *buf, unsigned size); /* 逐页验证缓冲区�
 static void check_str(const char *s);                  /* 逐页验证字符串，每页只调用一次 pagedir_get_page */
 static int get_arg(struct intr_frame *f, int n);       /* 从用户栈取第 n 个 syscall 参数 */
 static void syscall_exit(int status);
+static void pin_buf(const void *buf, unsigned size, bool write);
+static void unpin_buf(const void *buf, unsigned size);
+static void pin_str(const char *s);
+static void unpin_str(const char *s);
 
 /* 全局文件系统锁：Pintos 文件系统不是线程安全的，
    所有 filesys_* / file_* 调用都必须持有此锁。 */
@@ -39,6 +46,10 @@ void filesys_release(void) { lock_release(&filesys_lock); }
 static void
 syscall_handler(struct intr_frame *f)
 {
+#ifdef VM
+  thread_current()->saved_esp = f->esp;
+#endif
+
   /* 验证 syscall_num 可访问 */
   check_ptr(f->esp);
   check_ptr((char *)f->esp + 3);
@@ -88,9 +99,11 @@ syscall_handler(struct intr_frame *f)
     const char *name = (const char *)get_arg(f, 0);
     unsigned size = (unsigned)get_arg(f, 1);
     check_str(name);
+    pin_str(name);
     lock_acquire(&filesys_lock);
     f->eax = filesys_create(name, size);
     lock_release(&filesys_lock);
+    unpin_str(name);
     break;
   }
 
@@ -100,9 +113,11 @@ syscall_handler(struct intr_frame *f)
        但该文件在所有 fd 关闭前仍可继续读写 */
     const char *name = (const char *)get_arg(f, 0);
     check_str(name);
+    pin_str(name);
     lock_acquire(&filesys_lock);
     f->eax = filesys_remove(name);
     lock_release(&filesys_lock);
+    unpin_str(name);
     break;
   }
 
@@ -113,9 +128,11 @@ syscall_handler(struct intr_frame *f)
         */
     const char *name = (const char *)get_arg(f, 0);
     check_str(name);
+    pin_str(name);
     lock_acquire(&filesys_lock);
     struct file *file = filesys_open(name);
     lock_release(&filesys_lock);
+    unpin_str(name);
     if (file == NULL)
     {
       f->eax = -1; /* 文件不存在或无法打开 */
@@ -177,9 +194,11 @@ syscall_handler(struct intr_frame *f)
     check_buf(buf, sz); /* 逐页验证缓冲区每一页均已映射 */
     if (fd == STDIN_FILENO)
     {
+      pin_buf(buf, sz, true);
       uint8_t *b = buf;
       for (unsigned i = 0; i < sz; i++)
         b[i] = input_getc(); /* input_getc as pintos manual said */
+      unpin_buf(buf, sz);
       f->eax = sz;
     }
     else
@@ -190,9 +209,11 @@ syscall_handler(struct intr_frame *f)
         f->eax = -1;
         break;
       }
+      pin_buf(buf, sz, true);
       lock_acquire(&filesys_lock);
       f->eax = file_read(t->fd_table[fd], buf, sz);
       lock_release(&filesys_lock);
+      unpin_buf(buf, sz);
     }
     break;
   }
@@ -209,7 +230,9 @@ syscall_handler(struct intr_frame *f)
     check_buf(buf, sz); /* 逐页验证缓冲区每一页均已映射 */
     if (fd == STDOUT_FILENO)
     {
+      pin_buf(buf, sz, false);
       putbuf(buf, sz); /* putbuf as pintos manual said */
+      unpin_buf(buf, sz);
       f->eax = sz;
     }
     else
@@ -220,9 +243,11 @@ syscall_handler(struct intr_frame *f)
         f->eax = -1;
         break;
       }
+      pin_buf(buf, sz, false);
       lock_acquire(&filesys_lock);
       f->eax = file_write(t->fd_table[fd], buf, sz);
       lock_release(&filesys_lock);
+      unpin_buf(buf, sz);
     }
     break;
   }
@@ -274,9 +299,14 @@ syscall_handler(struct intr_frame *f)
 static void
 check_ptr(const void *ptr)
 {
+#ifdef VM
+  if (!page_resolve(ptr, false))
+    syscall_exit(-1);
+#else
   if (ptr == NULL || !is_user_vaddr(ptr) ||
       pagedir_get_page(thread_current()->pagedir, ptr) == NULL)
     syscall_exit(-1);
+#endif
 }
 
 /* check_buf - 验证用户空间缓冲区 [buf, buf+size) 所覆盖的每一页均已映射。
@@ -311,6 +341,101 @@ check_str(const char *s)
       s++;
     }
   }
+}
+
+static void
+pin_buf(const void *buf, unsigned size, bool write)
+{
+#ifdef VM
+  const uint8_t *start = buf;
+  const uint8_t *end;
+  uintptr_t page;
+
+  if (size == 0)
+    return;
+
+  end = start + size - 1;
+  for (page = (uintptr_t)pg_round_down(start);
+       page <= (uintptr_t)pg_round_down(end);
+       page += PGSIZE)
+  {
+    if (!page_resolve_and_pin((const void *)page, write))
+      syscall_exit(-1);
+  }
+#else
+  (void)buf;
+  (void)size;
+  (void)write;
+#endif
+}
+
+static void
+unpin_buf(const void *buf, unsigned size)
+{
+#ifdef VM
+  const uint8_t *start = buf;
+  const uint8_t *end;
+  uintptr_t page;
+
+  if (size == 0)
+    return;
+
+  end = start + size - 1;
+  for (page = (uintptr_t)pg_round_down(start);
+       page <= (uintptr_t)pg_round_down(end);
+       page += PGSIZE)
+    page_unpin((const void *)page);
+#else
+  (void)buf;
+  (void)size;
+#endif
+}
+
+static void
+pin_str(const char *s)
+{
+#ifdef VM
+  while (true)
+  {
+    const char *page_start = pg_round_down(s);
+    const char *page_end;
+
+    if (!page_resolve_and_pin(page_start, false))
+      syscall_exit(-1);
+
+    page_end = page_start + PGSIZE;
+    while (s < page_end)
+    {
+      if (*s == '\0')
+        return;
+      s++;
+    }
+  }
+#else
+  (void)s;
+#endif
+}
+
+static void
+unpin_str(const char *s)
+{
+#ifdef VM
+  while (true)
+  {
+    const char *page_start = pg_round_down(s);
+    const char *page_end = page_start + PGSIZE;
+
+    page_unpin(page_start);
+    while (s < page_end)
+    {
+      if (*s == '\0')
+        return;
+      s++;
+    }
+  }
+#else
+  (void)s;
+#endif
 }
 
 /* get_arg - 从用户栈 f->esp 中获取第 n 个 4 字节系统调用参数。

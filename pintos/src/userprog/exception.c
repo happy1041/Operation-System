@@ -4,6 +4,17 @@
 #include "userprog/gdt.h"
 #include "threads/interrupt.h"
 #include "threads/thread.h"
+#include "threads/vaddr.h"
+#ifdef VM
+#include "vm/page.h"
+#endif
+
+#ifdef VM
+#define STACK_MAX (8 * 1024 * 1024)
+
+/* 判断一次缺页是否可以解释为合法的用户栈增长。 */
+static bool should_grow_stack(void *fault_addr, void *esp);
+#endif
 
 /** Number of page faults processed. */
 static long long page_fault_cnt;
@@ -122,10 +133,13 @@ kill(struct intr_frame *f)
 static void
 page_fault(struct intr_frame *f)
 {
+#ifdef VM
    bool not_present; /**< True: not-present page, false: writing r/o page. */
    bool write;       /**< True: access was write, false: access was read. */
    bool user;        /**< True: access by user, false: access by kernel. */
    void *fault_addr; /**< Fault address. */
+   struct vm_page *page;
+   void *user_esp;
 
    /* Obtain faulting address, the virtual address that was
       accessed to cause the fault.  It may point to code or to
@@ -148,6 +162,27 @@ page_fault(struct intr_frame *f)
    write = (f->error_code & PF_W) != 0;
    user = (f->error_code & PF_U) != 0;
 
+   /* 用户态 fault 时记录当时 esp，供后续内核态访问用户页时参考。 */
+   if (user)
+      thread_current()->saved_esp = f->esp;
+
+   user_esp = user ? f->esp : thread_current()->saved_esp;
+
+   page = NULL;
+   if (not_present && is_user_vaddr(fault_addr))
+   {
+      /* 先尝试按普通懒加载页处理，找不到时再判断是否需要自动扩栈。 */
+      page = page_lookup(&thread_current()->spt, fault_addr);
+
+      if (page == NULL && should_grow_stack(fault_addr, user_esp) &&
+          page_register_stack(&thread_current()->spt, pg_round_down(fault_addr), false))
+         page = page_lookup(&thread_current()->spt, fault_addr);
+   }
+
+   /* 找到了合法后备页且权限允许时，真正触发补页。 */
+   if (page != NULL && !(write && !page->writable) && page_load(page))
+      return;
+
    /* To implement virtual memory, delete the rest of the function
       body, and replace it with code that brings in the page to
       which fault_addr refers. */
@@ -157,4 +192,39 @@ page_fault(struct intr_frame *f)
           write ? "writing" : "reading",
           user ? "user" : "kernel");
    kill(f);
+#else
+   void *fault_addr;
+   bool not_present;
+   bool write;
+   bool user;
+
+   asm("movl %%cr2, %0" : "=r"(fault_addr));
+   intr_enable();
+   page_fault_cnt++;
+
+   not_present = (f->error_code & PF_P) == 0;
+   write = (f->error_code & PF_W) != 0;
+   user = (f->error_code & PF_U) != 0;
+
+   printf("Page fault at %p: %s error %s page in %s context.\n",
+          fault_addr,
+          not_present ? "not present" : "rights violation",
+          write ? "writing" : "reading",
+          user ? "user" : "kernel");
+   kill(f);
+#endif
 }
+
+#ifdef VM
+static bool
+should_grow_stack(void *fault_addr, void *esp)
+{
+   void *stack_bottom = (uint8_t *)PHYS_BASE - STACK_MAX;
+
+   if (esp == NULL)
+      return false;
+
+   /* fault 地址接近 esp 且仍位于最大栈范围内。 */
+   return fault_addr >= stack_bottom && fault_addr >= esp - 32;
+}
+#endif

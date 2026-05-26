@@ -2,6 +2,7 @@
 #define THREADS_THREAD_H
 
 #include <debug.h>
+#include <hash.h>
 #include <list.h>
 #include <stdint.h>
 
@@ -112,6 +113,11 @@ struct thread
    struct file *exec_file;        /**< Executable file (deny-write held). */
    struct file *fd_table[128];    /**< File descriptor table; fd 0/1 reserved for stdin/stdout. */
    int fd_next;                   /**< Next allocatable fd, starts at 2. */
+#ifdef VM
+   /* Lab3a 新增：每个用户线程都维护自己的补充页表与最近一次用户栈顶。 */
+   struct hash spt; /**< Supplemental page table keyed by user virtual page. */
+   void *saved_esp; /**< Last known user stack pointer for fault handling. */
+#endif
 #endif
 
    /* Owned by thread.c. */
@@ -124,6 +130,11 @@ struct thread
 extern bool thread_mlfqs;
 
 void thread_init(void);
+#ifdef VM
+/* 在线程对象上初始化 VM 元数据；thread_vm_enable 用于在内存系统就绪后启用该流程。 */
+void thread_vm_init(struct thread *t);
+void thread_vm_enable(void);
+#endif
 void thread_start(void);
 
 void thread_tick(void);
